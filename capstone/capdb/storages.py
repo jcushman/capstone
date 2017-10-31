@@ -68,6 +68,15 @@ class CapS3Storage(CapStorageMixin, S3Boto3Storage):
         # boto3 should return 'versionID': (version id) if successful, this will return True or False
         return 'VersionId' in results
 
+    def contents(self, path, mode='r'):
+        result = super().contents(path, mode)
+
+        # handle S3Boto3Storage bug where 'r' mode returns bytes -- https://github.com/jschneier/django-storages/issues/404
+        if mode == 'r':
+            result = result.decode('utf8')
+
+        return result
+
 class CapFileStorage(CapStorageMixin, FileSystemStorage):
 
     def iter_files(self, search_path="", partial_path=False):
