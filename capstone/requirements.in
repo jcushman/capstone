@@ -3,6 +3,14 @@
 # general
 tqdm                # script progress bars
 
+# tasks
+dask[bag]           # job processing
+distributed         # dask distributed
+joblib              # function caching
+graphviz            # visualize dask call graph
+bokeh<=0.12.9       # visualize dask performance -- max version until https://github.com/dask/dask/issues/2843 is fixed
+
+
 # xml
 lxml
 xmltodict
