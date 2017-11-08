@@ -273,3 +273,61 @@ def write_inventory_files():
             csv_w = csv.writer(f)
             for row in result_set:
                 csv_w.writerow(row)
+
+
+@task
+def compress_volumes(*barcodes, max_volumes=10, delay=False):
+    from capdb.storages import ingest_storage
+    from capdb.tasks import compress_volume
+
+    max_volumes = int(max_volumes)
+
+    def get_volumes():
+        """ Get all up-to-date volumes. """
+        volumes = ingest_storage.iter_files("")
+        current_vol = next(volumes, "")
+        while current_vol:
+            next_vol = next(volumes, "")
+            if current_vol.split("_", 1)[0] != next_vol.split("_", 1)[0]:
+                yield current_vol
+            current_vol = next_vol
+
+    if barcodes:
+        # get folder for each barcode provided at command line
+        barcodes = [max(ingest_storage.iter_files(barcode, partial_path=True)) for barcode in barcodes]
+    else:
+        # get latest folder all volumes
+        barcodes = get_volumes()
+
+    for i, barcode in enumerate(barcodes):
+        if delay:
+            compress_volume.delay(barcode)
+        else:
+            print("Calling", barcode)
+            compress_volume.apply(args=[barcode])
+        if max_volumes and i >= max_volumes:
+            break
+
+@task
+def gz_dir(d, d2):
+    import subprocess, shutil
+
+    for root, dirs, files in os.walk(d):
+        for f in files:
+            f_in = os.path.join(root, f)
+            f_out = f_in.replace(d, d2)
+            os.makedirs(os.path.dirname(f_out), exist_ok=True)
+            print("%s -> %s" % (f_in, f_out))
+            if f.endswith('.xml'):
+                subprocess.call("xz < %s > %s.gz" % (f_in, f_out), shell=True)
+            else:
+                shutil.copy(f_in, f_out)
+
+@task
+def count_gz_dir(d):
+    size=0
+    for root, dirs, files in os.walk(d):
+        for f in files:
+            if f.endswith('.gz'):
+                size += os.path.getsize(os.path.join(root, f))
+    print(size)

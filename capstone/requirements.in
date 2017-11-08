@@ -2,6 +2,7 @@
 
 # general
 tqdm                # script progress bars
+celery              # task queue
 
 # xml
 lxml
