@@ -55,7 +55,7 @@ class CitationViewSet(BaseViewSet):
 
 
 class CaseViewSet(BaseViewSet):
-    serializer_class = serializers.CaseSerializer
+    serializer_class = serializers.CaseSerializer3
     queryset = models.CaseMetadata.objects.in_scope().select_related(
         'volume',
         'reporter',

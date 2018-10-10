@@ -477,3 +477,25 @@ def test_swagger(client, url, content_type):
 def test_redoc(client):
     response = client.get(api_reverse("schema-redoc"))
     check_response(response, content_type="text/html")
+
+@pytest.mark.django_db
+def test_profile_cases(client, benchmark_requests):
+    from capapi import serializers
+    from capapi.views.api_views import CaseViewSet
+
+    cases = [CaseXMLFactory().metadata for _ in range(100)]
+    url = api_reverse('casemetadata-list')
+
+    for cls in (
+            # serializers.CaseSerializer,
+            # serializers.CaseSerializer2,
+            serializers.CaseSerializer3,
+    ):
+        CaseViewSet.serializer_class = cls
+        with benchmark_requests() as times:
+            for i in range(50):
+                client.get(url)
+        print(cls)
+        print(times)
+        print("Average: %s" % (sum(times)/len(times)))
+        print("Min: %s" % min(times))

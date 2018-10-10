@@ -1,6 +1,8 @@
 import logging
 import re
+from collections import OrderedDict
 
+import serpy
 from django.db import transaction
 from rest_framework import serializers
 from rest_framework.reverse import reverse
@@ -16,11 +18,39 @@ from .permissions import get_single_casebody_permissions
 logger = logging.getLogger(__name__)
 
 
+
+class BaseSerializer(serpy.Serializer):
+    def _serialize(self, instance, fields):
+        # This can be dropped in Python 3.6
+        out = super()._serialize(instance, fields)
+        sorted_out = OrderedDict((name, out[name]) for name in self.Meta.fields)
+        return sorted_out
+
+class ObjectUrlField(serpy.Field):
+    def as_getter(self, serializer_field_name, serializer_cls):
+        if self.attr:
+            return lambda obj: getattr(obj, self.attr).get_absolute_url()
+        return lambda obj: obj.get_absolute_url()
+
+class NestedField(serpy.Field):
+    def __init__(self, serializer_class, *args, **kwargs):
+        self.serializer_class = serializer_class
+        super().__init__(*args, **kwargs)
+
+    def as_getter(self, serializer_field_name, serializer_cls):
+        return lambda obj: self.serializer_class(getattr(obj, self.attr)).data
+
 class CitationSerializer(serializers.ModelSerializer):
     class Meta:
         model = models.Citation
         fields = ('type', 'cite')
 
+class CitationSerializer2(BaseSerializer):
+    type = serpy.StrField()
+    cite = serpy.StrField()
+
+    class Meta:
+        fields = ('type', 'cite')
 
 class CitationWithCaseSerializer(CitationSerializer):
     case_url = serializers.HyperlinkedRelatedField(source='case', view_name='casemetadata-detail',
@@ -30,6 +60,13 @@ class CitationWithCaseSerializer(CitationSerializer):
         fields = CitationSerializer.Meta.fields + ('case_id', 'case_url')
 
 
+class CitationWithCaseSerializer2(CitationSerializer2):
+    case_id = serpy.IntField()
+    case_url = ObjectUrlField(attr='case')
+
+    class Meta:
+        fields = CitationSerializer2.Meta.fields + ('case_id', 'case_url')
+
 class JurisdictionSerializer(serializers.ModelSerializer):
     url = serializers.HyperlinkedIdentityField(
         view_name="jurisdiction-detail",
@@ -37,6 +74,18 @@ class JurisdictionSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = models.Jurisdiction
+        fields = ('url', 'id', 'slug', 'name', 'name_long', 'whitelisted')
+
+
+class JurisdictionSerializer2(BaseSerializer):
+    id = serpy.IntField()
+    url = ObjectUrlField()
+    slug = serpy.StrField()
+    name = serpy.StrField()
+    name_long = serpy.StrField()
+    whitelisted = serpy.BoolField()
+
+    class Meta:
         fields = ('url', 'id', 'slug', 'name', 'name_long', 'whitelisted')
 
 
@@ -50,6 +99,17 @@ class CourtSerializer(serializers.ModelSerializer):
         fields = ('url', 'id', 'slug', 'name', 'name_abbreviation')
 
 
+class CourtSerializer2(BaseSerializer):
+    id = serpy.IntField()
+    url = ObjectUrlField()
+    slug = serpy.StrField()
+    name = serpy.StrField()
+    name_abbreviation = serpy.StrField()
+
+    class Meta:
+        fields = ('url', 'id', 'slug', 'name', 'name_abbreviation')
+
+
 class CaseVolumeSerializer(serializers.ModelSerializer):
     """ Abbreviated version of VolumeSerializer for embedding in CaseSerializer. """
     volume_number = serializers.ReadOnlyField(source='xml_volume_number')
@@ -59,10 +119,31 @@ class CaseVolumeSerializer(serializers.ModelSerializer):
         fields = ('url', 'volume_number')
 
 
+class CaseVolumeSerializer2(BaseSerializer):
+    """ Abbreviated version of VolumeSerializer for embedding in CaseSerializer. """
+    url = ObjectUrlField()
+    volume_number = serpy.StrField(attr='xml_volume_number')
+
+    class Meta:
+        fields = ('url', 'volume_number')
+
+
 class CaseReporterSerializer(serializers.ModelSerializer):
     """ Abbreviated version of CaseSerializer for embedding in CaseSerializer. """
     class Meta:
         model = models.Reporter
+        fields = (
+            'url',
+            'full_name',
+        )
+
+
+class CaseReporterSerializer2(BaseSerializer):
+    """ Abbreviated version of CaseSerializer for embedding in CaseSerializer. """
+    url = ObjectUrlField()
+    full_name = serpy.StrField()
+
+    class Meta:
         fields = (
             'url',
             'full_name',
@@ -97,6 +178,119 @@ class CaseSerializer(serializers.HyperlinkedModelSerializer):
             'jurisdiction',
         )
 
+class CaseSerializer2(BaseSerializer):
+    id = serpy.IntField()
+    url = ObjectUrlField()
+    name = serpy.StrField()
+    name_abbreviation = serpy.StrField()
+    decision_date = serpy.StrField()
+    docket_number = serpy.StrField()
+    first_page = serpy.StrField()
+    last_page = serpy.StrField()
+    citations = CitationSerializer2(many=True, call=True, attr='citations.all')
+    volume = CaseVolumeSerializer2()
+    reporter = CaseReporterSerializer2()
+    court = NestedField(CourtSerializer2, attr='denormalized_court')
+    jurisdiction = NestedField(JurisdictionSerializer2, attr='denormalized_jurisdiction')
+
+    class Meta:
+        # Used only for ordering; can be dropped in Python 3.6
+        fields = (
+            'id',
+            'url',
+            'name',
+            'name_abbreviation',
+            'decision_date',
+            'docket_number',
+            'first_page',
+            'last_page',
+            'citations',
+            'volume',
+            'reporter',
+            'court',
+            'jurisdiction',
+        )
+
+    def get_reporter(self, obj):
+        return OrderedDict((('url', obj.reporter.get_absolute_url()), ('full_name', obj.reporter.full_name)))
+
+
+class CaseSerializer3(serializers.HyperlinkedModelSerializer):
+    url = serializers.HyperlinkedIdentityField(
+        view_name="casemetadata-detail", lookup_field="id")
+    court = CourtSerializer(source='denormalized_court')
+    jurisdiction = JurisdictionSerializer(source='denormalized_jurisdiction')
+    citations = CitationSerializer(many=True)
+    volume = CaseVolumeSerializer()
+    reporter = CaseReporterSerializer()
+    decision_date = serializers.DateField(source='decision_date_original')
+
+    class Meta:
+        model = models.CaseMetadata
+        fields = (
+            'id',
+            'url',
+            'name',
+            'name_abbreviation',
+            'decision_date',
+            'docket_number',
+            'first_page',
+            'last_page',
+            'citations',
+            'volume',
+            'reporter',
+            'court',
+            'jurisdiction',
+        )
+
+    def to_representation(self, instance):
+        volume = instance.volume
+        reporter = instance.reporter
+        court = instance.court
+        jurisdiction = instance.jurisdiction
+        return OrderedDict((
+            ('id', instance.id),
+            ('url', instance.get_absolute_url()),
+            ('name', instance.name),
+            ('name_abbreviation', instance.name_abbreviation),
+            ('decision_date', instance.decision_date),
+            ('docket_number', instance.docket_number),
+            ('first_page', instance.first_page),
+            ('last_page', instance.last_page),
+            ('citations', CitationSerializer(instance.citations.all(), many=True).data),
+            ('volume', CaseVolumeSerializer(instance.volume, context=self._context).data),
+            ('reporter', CaseReporterSerializer(instance.reporter, context=self._context).data),
+            ('court', CourtSerializer(instance.denormalized_court, context=self._context).data),
+            ('jurisdiction', JurisdictionSerializer(instance.denormalized_jurisdiction, context=self._context).data),
+            # ('volume', OrderedDict((
+            #     ('id', volume.pk),
+            #     ('url', volume.get_absolute_url()),
+            #     ('volume_number', volume.volume_number),
+            # ))),
+            # ('reporter', OrderedDict((
+            #     ('id', reporter.id),
+            #     ('url', reporter.get_absolute_url()),
+            #     ('full_name', reporter.full_name),
+            # ))),
+            # ('court', OrderedDict((
+            #     ('id', court.id),
+            #     ('url', court.get_absolute_url()),
+            #     ('slug', court.slug),
+            #     ('name', court.name),
+            #     ('name_abbreviation', court.name_abbreviation),
+            # ))),
+            # ('jurisdiction', OrderedDict((
+            #     ('id', jurisdiction.id),
+            #     ('url', jurisdiction.get_absolute_url()),
+            #     ('slug', jurisdiction.slug),
+            #     ('name', jurisdiction.name),
+            #     ('name_long', jurisdiction.name_long),
+            #     ('whitelisted', jurisdiction.whitelisted),
+            # ))),
+        ))
+
+class CaseSerializerWithCasebody(CaseSerializer):
+    pass
 
 class CaseAllowanceMixin:
     """
