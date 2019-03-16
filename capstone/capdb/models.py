@@ -1,5 +1,7 @@
 import hashlib
 import re
+from collections import OrderedDict
+from contextlib import contextmanager
 
 from django.contrib.postgres.fields import JSONField, ArrayField
 import django.contrib.postgres.search as pg_search
@@ -8,17 +10,19 @@ from django.db import models, IntegrityError, transaction
 from django.db.models import Q
 from django.utils.text import slugify
 from django.utils.encoding import force_bytes, force_str
-from lxml import etree
+from lxml import etree, sax
 from model_utils import FieldTracker
 from partial_index import PartialIndex
+from pyquery import PyQuery
 
 from capdb.storages import bulk_export_storage
 from capdb.versioning import TemporalHistoricalRecords
 from capweb.helpers import reverse, transaction_safe_exceptions
+from scripts import render_case
 from scripts.helpers import (special_jurisdiction_cases, jurisdiction_translation, parse_xml,
                              serialize_xml, jurisdiction_translation_long_name,
                              short_id_from_s3_key)
-from scripts.process_metadata import get_case_metadata
+from scripts.process_metadata import get_case_metadata, parse_decision_date
 
 
 def choices(*args):
@@ -567,6 +571,7 @@ class VolumeMetadata(models.Model):
     # just extract this and keep it here for now -- we can use it to check the reporter= field later:
     xml_reporter_short_name = models.CharField(max_length=255, blank=True, null=True)
     xml_reporter_full_name = models.CharField(max_length=255, blank=True, null=True)
+    xml_metadata = JSONField(blank=True, null=True)
 
     tracker = FieldTracker()
 
@@ -751,6 +756,7 @@ class CaseMetadata(models.Model):
     case_id = models.CharField(max_length=64, null=True, db_index=True)
     first_page = models.CharField(max_length=255, null=True, blank=True)
     last_page = models.CharField(max_length=255, null=True, blank=True)
+    publication_status = models.CharField(max_length=255, null=True, blank=True)
     jurisdiction = models.ForeignKey('Jurisdiction', null=True, related_name='case_metadatas',
                                      on_delete=models.SET_NULL)
     judges = JSONField(null=True, blank=True)
@@ -759,9 +765,13 @@ class CaseMetadata(models.Model):
     attorneys = JSONField(null=True, blank=True)
 
     docket_number = models.CharField(max_length=20000, blank=True)
+    docket_numbers = JSONField(null=True, blank=True)
     decision_date = models.DateField(null=True, blank=True)
     decision_date_original = models.CharField(max_length=100, blank=True)
+    argument_date_original = models.CharField(max_length=100, blank=True, null=True)
     court = models.ForeignKey('Court', null=True, related_name='case_metadatas', on_delete=models.SET_NULL)
+    district_name = models.CharField(max_length=255, null=True, blank=True)
+    district_abbreviation = models.CharField(max_length=255, null=True, blank=True)
     name = models.TextField(blank=True)
     name_abbreviation = models.CharField(max_length=1024, blank=True, db_index=True)
     volume = models.ForeignKey('VolumeMetadata', related_name='case_metadatas',
@@ -770,6 +780,7 @@ class CaseMetadata(models.Model):
                                  on_delete=models.DO_NOTHING)
     date_added = models.DateTimeField(null=True, blank=True, auto_now_add=True)
     duplicative = models.BooleanField(default=False)
+    initial_metadata_synced = models.BooleanField(default=False)
 
     # denormalized fields -
     # these should not be set directly, but are automatically copied from self.jurisdiction by database triggers
@@ -842,11 +853,145 @@ class CaseMetadata(models.Model):
             case_text = CaseText(metadata=self)
 
         if new_text is None:
-            new_text = self.case_xml.extract_casebody().text()
+            try:
+                new_text = self.structure.extract_text()
+            except CaseStructure.DoesNotExist:
+                new_text = self.case_xml.extract_casebody().text()
 
         if new_text != case_text.text:
             case_text.text = new_text
             case_text.save()
+
+    def get_hydrated_structure(self):
+        structure = self.structure
+        blocks_by_id = PageStructure.blocks_by_id(structure.pages.all())
+        renderer = render_case.VolumeRenderer(blocks_by_id, {})
+        return renderer.hydrate_opinions(structure.opinions, blocks_by_id)
+
+    def sync_case_structure(self):
+        structure = self.structure
+        blocks_by_id = PageStructure.blocks_by_id(structure.pages.all())
+        fonts_by_id = CaseFont.fonts_by_id(blocks_by_id)
+
+        renderer = render_case.VolumeRenderer(blocks_by_id, fonts_by_id)
+        text = renderer.render_text(self)
+        html = renderer.render_html(self)
+        xml = renderer.render_xml(self)
+
+        ## create json
+
+        # extract each opinion into a dictionary
+        casebody_pq = PyQuery(html)
+        opinions = []
+        for opinion in casebody_pq.items('.opinion'):
+            opinions.append({
+                'type': opinion.attr.type,
+                'author': opinion('.author').text() or None,
+                'text': opinion.text(),
+            })
+            # remove opinion so it doesn't get included in head_matter below
+            opinion.remove()
+        json = {
+            'head_matter': casebody_pq.text(),
+            'judges': [judge.text for judge in casebody_pq('p.judges')],
+            'attorneys': [attorney.text for attorney in casebody_pq('p.attorneys')],
+            'parties': [party.text for party in casebody_pq('p.parties')],
+            'opinions': [
+                {
+                    'type': opinion.attr.type,
+                    'author': opinion('p.author').text() or None,
+                }
+                for opinion in casebody_pq.items('section.opinion')
+            ]
+        }
+
+        ## save
+
+        try:
+            body_cache = self.body_cache
+        except CaseBodyCache.DoesNotExist:
+            body_cache = CaseBodyCache(metadata=self)
+        body_cache.text = text
+        body_cache.html = html
+        body_cache.xml = xml
+        body_cache.json = json
+        body_cache.save()
+
+    def sync_from_initial_metadata(self):
+        if self.initial_metadata_synced:
+            return
+        self.initial_metadata_synced = True
+        data = self.initial_metadata.metadata
+
+        # set up data
+        duplicative_case = data['duplicative']
+
+        self.duplicative = duplicative_case
+        self.first_page = data["first_page"]
+        self.last_page = data["last_page"]
+
+        if not duplicative_case:
+            self.name = data["name"]
+            self.name_abbreviation = data["name_abbreviation"]
+            self.publication_status = data["status"]
+            self.decision_date_original = data["decision_date"]
+            self.decision_date = parse_decision_date(data["decision_date"])
+            self.argument_date_original = data.get("argument_date")
+            if data["docket_numbers"]:
+                self.docket_number = data["docket_numbers"][0]
+            self.docket_numbers = data["docket_numbers"]
+            if data.get("district"):
+                self.district_name = data["district"]["name"]
+                self.district_abbreviation = data["district"]["abbreviation"]
+
+            # set jurisdiction
+            court = data["court"]
+            try:
+                if self.volume.barcode in special_jurisdiction_cases:
+                    jurisdiction_name = special_jurisdiction_cases[self.volume.barcode]
+                else:
+                    jurisdiction_name = jurisdiction_translation[court["jurisdiction"]]
+                self.jurisdiction = Jurisdiction.get_from_cache(name=jurisdiction_name)
+            except KeyError:
+                # just mark these as None -- they require manual cleanup
+                self.jurisdiction = None
+
+            # set or create court
+            # we look up court by name, name_abbreviation, and jurisdiction
+            court_kwargs = {obj_key:court[data_key] for obj_key, data_key in (('name', 'name'), ('name_abbreviation', 'abbreviation')) if data_key in court}
+            if self.jurisdiction and court_kwargs:
+                court_kwargs["jurisdiction_id"] = self.jurisdiction_id
+                try:
+                    court = Court.get_from_cache(**court_kwargs)
+                except Court.DoesNotExist:
+                    court = Court(**court_kwargs)
+                    court.save()
+                self.court = court
+
+        self.save()
+
+        ### Handle citations
+
+        # set up a fake cite for duplicate cases
+        if duplicative_case:
+            citations = [{
+                'category': 'official',
+                'type': 'bluebook',
+                'text': "{} {} {}".format(self.volume.volume_number, self.reporter.short_name, self.structure.pages.order_by('order').first().label),
+                'duplicative': True,
+            }]
+        else:
+            citations = data['citations']
+
+        # create each citation
+        self.citations.all().delete()
+        Citation.objects.bulk_create(Citation(
+            cite=citation['text'],
+            type=citation['category'],
+            category=citation['type'],
+            duplicative=citation.get('duplicative', False),
+            case=self,
+        ) for citation in citations)
 
 
 class CaseXML(BaseXMLModel):
@@ -1221,6 +1366,7 @@ class CaseXML(BaseXMLModel):
 class Citation(models.Model):
     type = models.CharField(max_length=100,
                             choices=(("official", "official"), ("parallel", "parallel")))
+    category = models.CharField(max_length=100, blank=True, null=True)  # this field and "type" are reversed from the vales in CaseXML
     cite = models.CharField(max_length=10000, db_index=True)
     duplicative = models.BooleanField(default=False)
     normalized_cite = models.SlugField(max_length=10000, null=True, db_index=True)
@@ -1459,3 +1605,87 @@ class Snippet(models.Model):
 
     def __str__(self):
         return self.label
+
+
+class TarFile(models.Model):
+    storage_path = models.CharField(max_length=1000)
+    hash = models.CharField(max_length=1000)
+
+
+class CaseFont(models.Model):
+    family = models.CharField(max_length=100)
+    size = models.CharField(max_length=100)
+    style = models.CharField(max_length=100, blank=True)
+    type = models.CharField(max_length=100)
+    width = models.CharField(max_length=100)
+
+    def __str__(self):
+        return "%s %s %s" % (self.family, self.size, self.style)
+
+    @classmethod
+    def fonts_by_id(cls, blocks_by_id):
+        font_ids = []
+        for block in blocks_by_id.values():
+            for token in block.get('tokens', []):
+                if type(token) != str and token[0] == 'font':
+                    font_ids.append(token[1]['id'])
+        return {t.id: t for t in cls.objects.filter(pk__in=font_ids)}
+
+class PageStructure(models.Model):
+    volume = models.ForeignKey(VolumeMetadata, on_delete=models.DO_NOTHING, related_name='page_structures')
+    order = models.SmallIntegerField()
+    label = models.CharField(max_length=100, blank=True)
+
+    blocks = JSONField()
+    spaces = JSONField(blank=True, null=True)  # probably unnecessary -- in case pages ever have more than one PrintSpace
+    font_names = JSONField(blank=True, null=True)  # for mapping font IDs back to style names in alto
+
+    image_file_name = models.CharField(max_length=100)
+    width = models.SmallIntegerField()
+    height = models.SmallIntegerField()
+    deskew = models.CharField(max_length=1000, blank=True)
+
+    ingest_source = models.ForeignKey(TarFile, on_delete=models.DO_NOTHING)
+    ingest_path = models.CharField(max_length=1000)
+
+    def order_to_alto_id(self):
+        """ Convert 1 to alto_00001_0, 2 to alto_00001_1, 3 to alto_00002_0, and so on. """
+        return 'alto_%05d_%s' % ((self.order+1)//2, (self.order+1)%2)
+
+    @staticmethod
+    def blocks_by_id(pages):
+        blocks = {}
+        for page in pages:
+            for block in page.blocks:
+                block['page_label'] = page.label
+                blocks[block['id']] = block
+        return blocks
+
+
+class CaseStructure(models.Model):
+    metadata = models.OneToOneField(CaseMetadata, on_delete=models.DO_NOTHING, related_name='structure')
+    pages = models.ManyToManyField(PageStructure, related_name='cases')
+    opinions = JSONField()
+    corrections = JSONField(blank=True, null=True)
+
+    ingest_source = models.ForeignKey(TarFile, on_delete=models.DO_NOTHING)
+    ingest_path = models.CharField(max_length=1000)
+
+
+class CaseInitialMetadata(models.Model):
+    case = models.OneToOneField(CaseMetadata, on_delete=models.DO_NOTHING, related_name='initial_metadata')
+    metadata = JSONField()
+
+    ingest_source = models.ForeignKey(TarFile, on_delete=models.DO_NOTHING)
+    ingest_path = models.CharField(max_length=1000)
+
+
+class CaseBodyCache(models.Model):
+    """
+    Renditions of a case.
+    """
+    metadata = models.OneToOneField(CaseMetadata, related_name='body_cache', on_delete=models.CASCADE)
+    text = models.TextField(blank=True, null=True)
+    html = models.TextField(blank=True, null=True)
+    xml = models.TextField(blank=True, null=True)
+    json = JSONField(blank=True, null=True)

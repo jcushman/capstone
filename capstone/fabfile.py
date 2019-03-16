@@ -12,6 +12,7 @@ from pathlib import Path
 from celery import shared_task, group
 
 # set up Django
+from tqdm import tqdm
 
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings')
 try:
@@ -27,13 +28,14 @@ from fabric.api import local
 from fabric.decorators import task
 
 from capapi.models import CapUser
-from capdb.models import VolumeXML, VolumeMetadata, CaseXML, SlowQuery, Jurisdiction, Reporter
+from capdb.models import VolumeXML, VolumeMetadata, CaseXML, SlowQuery, Jurisdiction, Reporter, CaseMetadata
 
 import capdb.tasks as tasks
 from scripts import set_up_postgres, ingest_tt_data, data_migrations, ingest_by_manifest, mass_update, \
     validate_private_volumes as validate_private_volumes_script, compare_alto_case, export, count_chars, \
     update_snippets
-from scripts.helpers import parse_xml, serialize_xml, copy_file, resolve_namespace, volume_barcode_from_folder
+from scripts.helpers import parse_xml, serialize_xml, copy_file, resolve_namespace, volume_barcode_from_folder, \
+    up_to_date_volumes
 
 
 @task(alias='run')
@@ -76,11 +78,11 @@ def validate_private_volumes():
 
 @task
 def ingest_jurisdiction():
-    ingest_tt_data.populate_jurisdiction()
+    local("python manage.py loaddata --database=capdb test_data/dev_fixtures/jurisdictions.json")
 
 @task
 def ingest_metadata():
-    ingest_tt_data.populate_jurisdiction()
+    ingest_jurisdiction()
     ingest_tt_data.ingest(False)
 
 @task
@@ -176,7 +178,6 @@ def load_test_data():
     if settings.USE_TEST_TRACKING_TOOL_DB:
         local("python manage.py loaddata --database=tracking_tool test_data/tracking_tool.json")
     ingest_metadata()
-    ingest_jurisdiction()
     total_sync_with_s3()
 
 
@@ -927,8 +928,50 @@ def sample_captar_images(output_folder='samples'):
                     BytesIO(volume_storage.contents(image, 'rb'))  # passing file handle directly doesn't work because S3 storage strips file wrappers
                 )
 
-
 @task
 def make_pdf(volume_folder):
     import scripts.make_pdf
     scripts.make_pdf.make_pdf(volume_folder)
+
+@task
+def refactor_xml(*volume_barcodes, replace_existing=False, key=settings.REDACTION_KEY):
+    import scripts.refactor_xml
+    from capdb.storages import captar_storage
+    if not replace_existing:
+        existing_vols = {Path(p).stem for p in captar_storage.iter_files('token_streams')}
+
+    redacted_vols = up_to_date_volumes(captar_storage.iter_files('redacted'))
+    if volume_barcodes:
+        volume_barcodes = set(volume_barcodes)
+        redacted_vols = [i for i in redacted_vols if i[0] in volume_barcodes]
+    unredacted_vols = dict(up_to_date_volumes(captar_storage.iter_files('unredacted')))
+    for barcode, redacted_path in redacted_vols:
+        if barcode in unredacted_vols:
+            primary_path = unredacted_vols[barcode]
+            secondary_path = redacted_path
+        else:
+            primary_path = redacted_path
+            secondary_path = None
+        if not replace_existing and primary_path.name in existing_vols:
+            continue
+        scripts.refactor_xml.volume_to_json.delay(barcode, primary_path, secondary_path, key=key)
+
+@task
+def load_token_streams(replace_existing=False):
+    import scripts.refactor_xml
+    from capdb.storages import captar_storage
+
+    zip_paths = up_to_date_volumes(captar_storage.iter_files('token_streams'))
+
+    if not replace_existing:
+        already_imported = set(VolumeMetadata.objects.exclude(xml_metadata=None).values_list('barcode', flat=True))
+
+    for volume_barcode, path in zip_paths:
+        if not replace_existing and volume_barcode in already_imported:
+            continue
+        scripts.refactor_xml.write_to_db.delay(volume_barcode, path)
+
+@task
+def refresh_case_body_cache():
+    for case in tqdm(CaseMetadata.objects.exclude(structure=None)):
+        case.sync_case_structure()
