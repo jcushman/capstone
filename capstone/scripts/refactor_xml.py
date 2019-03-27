@@ -26,41 +26,69 @@ from scripts.compress_volumes import files_by_type, open_captar_volume
 from scripts.helpers import parse_xml
 
 
-# TODO:
-# - store ingested file path and md5
 
-def write_json(obj, path):
-    s = json.dumps(obj, indent=2)
-    path.write_text(s)
-
-def read_json(path):
-    return json.loads(path.read_text())
+### HELPERS ###
 
 rect_attrs = ['HPOS', 'VPOS', 'WIDTH', 'HEIGHT']
 def rect(el_attrib):
+    """ Convert an XML element like <foo HPOS="1" VPOS="2" WIDTH="3" HEIGHT="4"> to [1, 2, 3, 4]. """
     return [float(el_attrib[attr]) if '.' in el_attrib[attr] else int(el_attrib[attr]) for attr in rect_attrs]
 
 def parse(storage, path, remove_namespaces=True):
-    xml = parse_xml(storage.contents(path[:-3]))
+    """ Extract .gz-compressed XML path from storage, and return as PyQuery object. """
+    xml = parse_xml(storage.contents(path[:-3]))  # strip .gz so captar_storage will decompress for us
     if remove_namespaces:
         xml = xml.remove_namespaces()
     return xml
 
-def get_tokens(parent):
-    yield parent[0].text
-    for el in parent.children().items():
-        yield [el[0].tag] + ([dict(el[0].attrib)] if el[0].attrib else [])
-        yield from get_tokens(el)
-        yield ['/'+el[0].tag]
-        yield el[0].tail
+def tokenize_element(parent):
+    """
+        Tokenize the contents of an lxml Element. Example:
+        >>> tokenize_element(etree.XML("<p>text <footnotemark ref='foo'>1</footnotemark> text</p>"))
+        ['text ', ['footnotemark', {'ref':'foo'}], '1', ['/footnotemark'], ' text']
+    """
+    yield parent.text
+    for el in parent:
+        yield [el.tag] + ([dict(el.attrib)] if el.attrib else [])
+        yield from tokenize_element(el)
+        yield ['/'+el.tag]
+        yield el.tail
 
 def insert_tags(block, i, offset, new_tokens):
+    """
+        Insert new tokens at a given offset in a given string inside a list of strings.
+        Return change in length of block.
+        Example:
+        >>> block = ['foo', 'bar']
+        >>> insert_tags(block, 1, 2, [['new'], ['stuff']])
+        3
+        >>> blocks
+        ['foo', 'ba', ['new'], ['stuff'], 'r']
+    """
     text = block[i]
     to_insert = [token for token in [text[:offset]]+new_tokens+[text[offset:]] if token]
     block[i:i + 1] = to_insert
     return len(to_insert) - 1
 
 def index_blocks(blocks):
+    """
+        Given a list of blocks, return:
+            (a) the combined text from the blocks
+            (b) the offsets mapping from that text back to each string in the blocks
+            (c) a lookup of the strings themselves
+        Example:
+            >>> blocks = [['foo', ['tag'], 'bar'], ['baz']]
+            >>> blocks_text, blocks_offsets, blocks_lookup = index_blocks(blocks)
+            >>> blocks_text
+            'foobarbaz'
+            >>> blocks_offsets
+            [0, 3, 6]
+            >>> blocks_lookup
+            [[0, ['foo', ['tag'], 'bar'], 0], [3, ['foo', ['tag'], 'bar'], 2], [6, ['baz'], 0]]
+        This allows us to start from the combined text and use it to modify the individual strings in the blocks object.
+        For example, if we want to modify blocks_text[5] (an 'r'), we can search blocks_offsets to figure out that it is part
+        of entry 1 (because it is after 3 and before 6), and then use blocks_lookup[1] to update the original string.
+    """
     blocks_text = ''
     blocks_offsets = []
     blocks_lookup = []
@@ -72,103 +100,148 @@ def index_blocks(blocks):
                 blocks_text += token
     return blocks_text, blocks_offsets, blocks_lookup
 
-def add_tags(blocks, new_tokens):
+def sync_alto_blocks_with_case_tokens(alto_blocks, case_tokens):
     """
-    blocks = [[["baz"], "abc-", "def"], ["gh-i", "jkl", ["/baz"]]]
-    new_tokens = [["bar"], "abcd", ["foo"], "efg", ['/foo'], "hijkl", ["/bar"]]
-    add_tags(blocks, new_tokens)
-    assert blocks == [[['baz'], ['bar'], 'abc', ['edit', {'was': '-'}], ['/edit'], 'd', ['foo'], 'ef'], [['edit', {'was': '-'}], ['/edit'], 'g', ['/foo'], 'hi', 'jkl', ['/bar'], ['/baz']]]
+        Given a list of blocks of tokens from ALTO, and a single tokenized paragraph from CaseMETS, add 'edit' tags to
+        make the ALTO text match the case text. Then import all tags from the CaseMETS (such as footnotemark) into the
+        ALTO. Example:
+            >>> alto_blocks = [[["baz"], "abc-", "def"], ["gh-i", "jkl", ["/baz"]]]
+            >>> case_tokens = [["bar"], "abcd", ["foo"], "efg", ['/foo'], "hijkl", ["/bar"]]
+            >>> sync_alto_blocks_with_case_tokens(alto_blocks, case_tokens)
+            >>> blocks
+            [[['baz'], ['bar'], 'abc', ['edit', {'was': '-'}], ['/edit'], 'd', ['foo'], 'ef'], [['edit', {'was': '-'}], ['/edit'], 'g', ['/foo'], 'hi', 'jkl', ['/bar'], ['/baz']]]
     """
-    if not blocks:
-        # could be empty if paragraph consists solely of images
+    # could be empty if paragraph consists solely of images
+    if not alto_blocks:
         return
+
+    ## initial indexing ##
 
     # Break out the new tokens into a list of non-text tokens in [offset, token] form, and a string of the text tokens
     case_tokens = []
     case_text = ""
-    for token in new_tokens:
+    for token in case_tokens:
         if type(token) == str:
             if not case_text:
-                # lstrip up here so offsets will be correct
-                case_text += token.lstrip()
+                case_text += token.lstrip()  # lstrip here so offsets will be correct
             else:
                 case_text += token
         else:
             case_tokens.append([len(case_text), token])
     case_text = case_text.rstrip()  # remove any whitespace at start and end of paragraph of case text
 
-    # Break out the blocks into string of text tokens, list of offsets for non-text tokens, and list of non-text tokens
-    # in (offset, token_list, index) form
-    blocks_text, blocks_offsets, blocks_lookup = index_blocks(blocks)
+    blocks_text, blocks_offsets, blocks_lookup = index_blocks(alto_blocks)
 
-    # Find diff between two text strings, and update offsets in case_tokens to match text in blocks_text
+    ## text update -- update ALTO text to match case text ##
+
     if case_text != blocks_text:
+
+        # Get all differences between alto text and case text,
+        # in order from end to start so we don't mess up indexes as we make edits.
+        # tag will be "insert", "replace", or "delete"
+        # i1:i2 will be the target range in the alto text, and j1:j2 will be the source range in the case text
         diff = difflib.SequenceMatcher(None, blocks_text, case_text)
         opcodes = reversed([opcode for opcode in diff.get_opcodes() if opcode[0] != "equal"])
         for tag, i1, i2, j1, j2 in opcodes:
+
+            # find the target block for this edit
             block_index = bisect.bisect_right(blocks_offsets, i1) - 1
             offset, block, i = blocks_lookup[block_index]
+
+            # update range relative to offset for this block
             i1 -= offset
             i2 -= offset
-            needed = i2-i1
-            if needed:
+
+            # remove text from block, if necessary
+            len_to_remove = i2-i1
+            if len_to_remove:
                 # tag == "replace" or "delete"
                 removed = block[i][i1:i2]
                 block[i] = block[i][:i1] + block[i][i2:]
             else:
                 # tag == "insert"
                 removed = ''
+
+            # replace removed text with new text from case text, if any
             insert_count = insert_tags(block, i, i1, [
                 ['edit', {'was': removed}],
                 case_text[j1:j2],  # will be empty if tag == "delete"
                 ['/edit'],
             ])
 
-            # for replace or delete, keep removing from subsequent strings if necessary
-            needed -= len(removed)
-            while needed > 0:
+            # if we still have more text to delete, keep removing it from subsequent block-strings
+            len_to_remove -= len(removed)
+            while len_to_remove > 0:
+
+                # find next block-string
                 old_block = block
                 block_index += 1
                 offset, block, i = blocks_lookup[block_index]
+
+                # modify block-string index based on any items we've already inserted into this block
                 if block != old_block:
                     insert_count = 0
                 i += insert_count
-                removed = block[i][:needed]
-                block[i] = block[i][needed:]
+
+                # delete text
+                removed = block[i][:len_to_remove]
+                block[i] = block[i][len_to_remove:]
                 insert_count += insert_tags(block, i, 0, [
                     ['edit', {'was': removed}],
                     ['/edit'],
                 ])
-                needed -= len(removed)
+                len_to_remove -= len(removed)
 
-        # update offsets
-        blocks_text, blocks_offsets, blocks_lookup = index_blocks(blocks)
+        # reindex blocks to account for edits
+        blocks_text, blocks_offsets, blocks_lookup = index_blocks(alto_blocks)
 
-    # Insert all case_tokens into blocks
+    # insert all case_tokens into blocks
     for position, token in reversed(case_tokens):
         offset, block, i = blocks_lookup[bisect.bisect_right(blocks_offsets, position)-1]
-        offset = position-offset
-        text = block[i]
-        block[i:i+1] = ([text[:offset]] if offset > 0 else []) + [token] + ([text[offset:]] if offset <= len(text) - 1 else [])
+        insert_tags(block, i, position - offset, [token])
 
-def add_tags_for_case_pars(pars, blocks_by_id, case_id_to_alto_ids):
+def sync_alto_blocks_with_case_paragraphs(pars, blocks_by_id, case_id_to_alto_ids):
+    """
+        Given a list of CaseMETS paragraphs as PyQuery objects, update all ALTO blocks in blocks_by_id that are
+        referenced by those paragraphs. We make two kinds of updates:
+            (a) blocks that do not come at the end of a paragraph get a space at the end
+            (b) blocks get their text and tags updated based on case text and tags (e.g. hyphen fixes, footnotemarks)
+    """
     for par in pars:
+        # look up ALTO blocks from case paragraph IDs
         alto_ids = case_id_to_alto_ids[par.attr.id]
         blocks = [blocks_by_id[id]['tokens'] for id in alto_ids if blocks_by_id[id].get('tokens')]
+
+
+        # add space to last word of blocks that do not come last in the paragraph
         for block in blocks[:-1]:
-            # add space to last word in block
             for i in range(len(block) - 1, -1, -1):
                 if type(block[i]) == str:
                     block[i] = block[i].rstrip() + ' '
                     break
-        add_tags(blocks, get_tokens(par))
+
+        # sync text and tags
+        sync_alto_blocks_with_case_tokens(blocks, tokenize_element(par[0]))
 
 def extract_paragraphs(children, case_id_to_alto_ids, blocks_by_id):
+    """
+        Extract paragraph and footnote structures from a list of CaseMETS paragraphs and footnotes as PyQuery elements.
+        Example:
+            >>> children = PyQuery("<opinion><author id='1'>text</author><footnote id='footnote_1_1'><p id='2'>footnote text</p></footnote></opinion>").children().items()
+            >>> paragraphs, footnotes, paragraph_els = extract_paragraphs(children, case_id_to_alto_ids, blocks_by_id)
+            >>> paragraphs
+            [{'id': 1, 'class': 'author', 'block_ids':[1]}]
+            >>> footnotes
+            [{'id': 'footnote_1_1', 'paragraphs': [{'id': 2, 'class': 'p', 'block_ids':[2, 3]}]
+            >>> paragraph_els
+            [<PyQuery ...>, <PyQuery ...>]
+    """
     paragraphs = []
     footnotes = []
     paragraph_els = []
     for el in children:
         if el[0].tag == 'footnote':
+            # extract footnote tag and call self recursively to get footnote paragraphs
             footnote = {'id': el.attr.id}
             if el.attr.label:
                 footnote['label'] = el.attr.label
@@ -181,6 +254,7 @@ def extract_paragraphs(children, case_id_to_alto_ids, blocks_by_id):
             paragraph_els.extend(footnote_par_els)
             footnotes.append(footnote)
         else:
+            # extract other tags as paragraphs
             par = {
                 'id': el.attr.id,
                 'class': el[0].tag,
@@ -193,6 +267,7 @@ def extract_paragraphs(children, case_id_to_alto_ids, blocks_by_id):
     return paragraphs, footnotes, paragraph_els
 
 def iter_case_paragraphs(opinions):
+    """ Yield all paragraph dicts from a list of opinions in tokenstream form. """
     for opinion in opinions:
         yield from opinion.get('paragraphs', [])
         for footnote in opinion.get('footnotes', []):
@@ -200,6 +275,11 @@ def iter_case_paragraphs(opinions):
 
 @shared_task
 def volume_to_json(volume_barcode, primary_path, secondary_path, key=settings.REDACTION_KEY):
+    """
+        Given volume barcode and locations of redacted and unredacted captar files, write out extracted tokenstreams
+        as a zip file. This wrapper just makes sure the captar files are available locally, and then hands off to
+        another function for the main work.
+    """
     with open_captar_volume(primary_path) as unredacted_storage:
         if secondary_path:
             with open_captar_volume(secondary_path) as redacted_storage:
@@ -208,7 +288,10 @@ def volume_to_json(volume_barcode, primary_path, secondary_path, key=settings.RE
             volume_to_json_inner(volume_barcode, unredacted_storage, key=key)
 
 def volume_to_json_inner(volume_barcode, unredacted_storage, redacted_storage=None, key=settings.REDACTION_KEY):
-
+    """
+        Given volume barcode and redacted and unredacted captar storages, write out extracted tokenstreams as a zip file.
+    """
+    
     pages = []
     cases = []
     fonts = {}
@@ -496,7 +579,7 @@ def volume_to_json_inner(volume_barcode, unredacted_storage, redacted_storage=No
                 'type': op_type,
             }
             paragraphs, footnotes, paragraph_els = extract_paragraphs(children, case_id_to_alto_ids, blocks_by_id)
-            add_tags_for_case_pars(paragraph_els, blocks_by_id, case_id_to_alto_ids)
+            sync_alto_blocks_with_case_paragraphs(paragraph_els, blocks_by_id, case_id_to_alto_ids)
             if paragraphs:
                 opinion['paragraphs'] = paragraphs
             if footnotes:
@@ -510,8 +593,6 @@ def volume_to_json_inner(volume_barcode, unredacted_storage, redacted_storage=No
                 case['corrections'] = [el.text() for el in corrections]
 
         cases.append(case)
-
-    # write_json(cases, cases_cache)
 
     if redacted_storage:
         print("Encrypting pages")
@@ -623,7 +704,7 @@ def write_to_db(volume_barcode, zip_path):
             volume = json.loads(zip.open('volume.json').read().decode('utf8'))
             pages = json.loads(zip.open('pages.json').read().decode('utf8'))
             cases = json.loads(zip.open('cases.json').read().decode('utf8'))
-            fonts_by_id = json.loads(zip.open('fonts.json').read().decode('utf8'))
+            fonts_by_fake_id = json.loads(zip.open('fonts.json').read().decode('utf8'))
 
     with transaction.atomic(using='capdb'):
 
@@ -643,9 +724,11 @@ def write_to_db(volume_barcode, zip_path):
         # create fonts
         print("Saving fonts")
         font_fake_id_to_real_id = {}
-        for font_fake_id, font_attrs in fonts_by_id.items():
+        fonts_by_id = {}
+        for font_fake_id, font_attrs in fonts_by_fake_id.items():
             font_obj, _ = CaseFont.objects.get_or_create(**font_attrs)
             font_fake_id_to_real_id[int(font_fake_id)] = font_obj.pk
+            fonts_by_id[font_obj.pk] = font_obj
 
         # update fake font IDs
         for page in pages:
@@ -684,16 +767,19 @@ def write_to_db(volume_barcode, zip_path):
         # save join table
         print("Saving join table")
         page_objs_by_block_id = {block['id']:p for p in page_objs for block in p.blocks}
-        links = {(case.id, page_objs_by_block_id[block_id].id) for case in case_objs for par in iter_case_paragraphs(case.opinions) for block_id in par['block_ids']}
+        links = {(case.id, page_objs_by_block_id[block_id].id)
+                 for case in case_objs
+                 for par in iter_case_paragraphs(case.opinions)
+                 for block_id in par['block_ids']}
         link_objs = [CaseStructure.pages.through(casestructure_id=case_id, pagestructure_id=page_id) for case_id, page_id in links]
         CaseStructure.pages.through.objects.bulk_create(link_objs)
 
         # update cached values
         print("Caching data")
+        blocks_by_id = PageStructure.blocks_by_id(page_objs)
         for case in case_objs:
-            # TODO: optimize to use existing data instead of fetching from DB
-            case.metadata.sync_from_initial_metadata()
-            case.metadata.sync_case_structure()
+            case.metadata.sync_from_initial_metadata(force=True)
+            case.metadata.sync_case_structure(blocks_by_id=blocks_by_id, fonts_by_id=fonts_by_id)
 
 
 def case_xml_equal(case_obj, renderer, parsed, redacted):
@@ -798,22 +884,4 @@ def decrypt_page(page, key=settings.REDACTION_KEY, delete_encrypted_strings=Fals
     if delete_encrypted_strings:
         del page['encrypted_strings']
 
-
-import sys
-
-def info(type, value, tb):
-    if hasattr(sys, 'ps1') or not sys.stderr.isatty():
-    # we are in interactive mode or we don't have a tty-like
-    # device, so we call the default hook
-        sys.__excepthook__(type, value, tb)
-    else:
-        import traceback, pdb
-        # we are NOT in interactive mode, print the exception...
-        traceback.print_exception(type, value, tb)
-        print
-        # ...then start the debugger in post-mortem mode.
-        # pdb.pm() # deprecated
-        pdb.post_mortem(tb) # more "modern"
-
-sys.excepthook = info
 

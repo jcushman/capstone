@@ -868,10 +868,10 @@ class CaseMetadata(models.Model):
         renderer = render_case.VolumeRenderer(blocks_by_id, {})
         return renderer.hydrate_opinions(structure.opinions, blocks_by_id)
 
-    def sync_case_structure(self):
+    def sync_case_structure(self, blocks_by_id=None, fonts_by_id=None):
         structure = self.structure
-        blocks_by_id = PageStructure.blocks_by_id(structure.pages.all())
-        fonts_by_id = CaseFont.fonts_by_id(blocks_by_id)
+        blocks_by_id = blocks_by_id or PageStructure.blocks_by_id(structure.pages.all())
+        fonts_by_id = fonts_by_id or CaseFont.fonts_by_id(blocks_by_id)
 
         renderer = render_case.VolumeRenderer(blocks_by_id, fonts_by_id)
         text = renderer.render_text(self)
@@ -917,8 +917,8 @@ class CaseMetadata(models.Model):
         body_cache.json = json
         body_cache.save()
 
-    def sync_from_initial_metadata(self):
-        if self.initial_metadata_synced:
+    def sync_from_initial_metadata(self, force=False):
+        if self.initial_metadata_synced and not force:
             return
         self.initial_metadata_synced = True
         data = self.initial_metadata.metadata
@@ -1611,6 +1611,8 @@ class TarFile(models.Model):
     storage_path = models.CharField(max_length=1000)
     hash = models.CharField(max_length=1000)
 
+    def __str__(self):
+        return "%s <%s>" % (self.storage_path, self.hash)
 
 class CaseFont(models.Model):
     family = models.CharField(max_length=100)

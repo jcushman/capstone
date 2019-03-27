@@ -77,12 +77,12 @@ def validate_private_volumes():
     validate_private_volumes_script.validate_private_volumes()
 
 @task
-def ingest_jurisdiction():
-    local("python manage.py loaddata --database=capdb test_data/dev_fixtures/jurisdictions.json")
+def ingest_fixtures():
+    local("python manage.py loaddata --database=capdb test_data/dev_fixtures/")
 
 @task
 def ingest_metadata():
-    ingest_jurisdiction()
+    ingest_fixtures()
     ingest_tt_data.ingest(False)
 
 @task
@@ -92,13 +92,6 @@ def sync_metadata():
     Changes field names according to maps listed at the top of ingest_tt_data script.
     """
     ingest_tt_data.ingest(True)
-
-@task
-def relink_reporter_jurisdiction():
-    """
-    This will re-build the links between the Reporter table and Jurisdiction table
-    """
-    ingest_tt_data.relink_reporter_jurisdiction()
 
 @task
 def run_pending_migrations():
