@@ -1,8 +1,11 @@
 import hashlib
+import json
 import re
 from collections import OrderedDict
 from contextlib import contextmanager
 
+import nacl
+from django.conf import settings
 from django.contrib.postgres.fields import JSONField, ArrayField
 import django.contrib.postgres.search as pg_search
 from django.core.exceptions import ObjectDoesNotExist
@@ -12,6 +15,8 @@ from django.utils.text import slugify
 from django.utils.encoding import force_bytes, force_str
 from lxml import etree, sax
 from model_utils import FieldTracker
+import nacl.encoding
+import nacl.secret
 from partial_index import PartialIndex
 from pyquery import PyQuery
 
@@ -1641,6 +1646,7 @@ class PageStructure(models.Model):
     blocks = JSONField()
     spaces = JSONField(blank=True, null=True)  # probably unnecessary -- in case pages ever have more than one PrintSpace
     font_names = JSONField(blank=True, null=True)  # for mapping font IDs back to style names in alto
+    encrypted_strings = models.TextField(blank=True, null=True)
 
     image_file_name = models.CharField(max_length=100)
     width = models.SmallIntegerField()
@@ -1662,6 +1668,85 @@ class PageStructure(models.Model):
                 block['page_label'] = page.label
                 blocks[block['id']] = block
         return blocks
+
+    def encrypt(self, key=settings.REDACTION_KEY):
+        """
+            Encrypt a page dictionary. Example:
+                >>> page = Page(blocks=[ \
+                    {'format': 'image', 'redacted':True, 'data':'unencrypted'}, \
+                    {'redacted':True, 'tokens': ['text']}, \
+                    {'tokens': ['text', ['redact'], 'text', ['/redact']]}, \
+                    ])
+                >>> page.encrypt(key)
+                >>> page.blocks
+                [
+                    {'format': 'image', 'redacted':True, 'data':['enc', {'i':0}]},
+                    {'redacted':True, 'tokens': [['enc', {'i':1}]]},
+                    {'tokens': ['text', ['redact'], ['enc', {'i':1}], ['/redact']]},
+                ]
+                >>> page.encrypted_strings
+                <encrypted JSON array containing the decrypted strings for each index value>
+        """
+        if self.encrypted_strings:
+            raise ValueError("Cannot encrypt page with existing 'encrypted_strings' value.")
+
+        # extract each redacted string and replace it with a reference like ['enc', {'i': 1}]. i value will later become the
+        # index into an encrypted array of strings.
+        strings = {}
+        string_counter = 0
+        for block in self.blocks:
+            if block.get('format') == 'image':
+                if block.get('redacted', False):
+                    enc_data = strings[block['data']] = ['enc', {'i': string_counter}]
+                    block['data'] = enc_data
+                    string_counter += 1
+            else:
+                all_redacted = block.get('redacted', False)
+                redacted_span = False
+                tokens = block.get('tokens', [])
+                for i in range(len(tokens)):
+                    token = tokens[i]
+                    if type(token) == str:
+                        if all_redacted or redacted_span:
+                            if token not in strings:
+                                strings[token] = ['enc', {'i': string_counter}]
+                                string_counter += 1
+                            tokens[i:i + 1] = [strings[token]]
+                    elif token[0] == 'redact':
+                        redacted_span = True
+                    elif token[0] == '/redact':
+                        redacted_span = False
+
+        # update references with correct i values
+        string_vals = list(strings.keys())
+        for i, val in enumerate(string_vals):
+            strings[val][1]['i'] = i
+
+        # store encrypted array
+        box = nacl.secret.SecretBox(key, encoder=nacl.encoding.Base64Encoder)
+        self.encrypted_strings = box.encrypt(json.dumps(string_vals).encode('utf8'),
+                                             encoder=nacl.encoding.Base64Encoder).decode('utf8')
+
+    def decrypt(self, key=settings.REDACTION_KEY):
+        """
+            Decrypt a page dictionary. Performs the reverse transformation to the example for encrypt().
+        """
+        # decrypt stored strings
+        box = nacl.secret.SecretBox(key, encoder=nacl.encoding.Base64Encoder)
+        strings = json.loads(
+            box.decrypt(self.encrypted_strings.encode('utf8'), encoder=nacl.encoding.Base64Encoder).decode('utf8'))
+
+        # replace tokens like ['enc', {'i': 1}] with ith entry from strings array
+        for block in self.blocks:
+            if block.get('format') == 'image':
+                if block.get('redacted', False):
+                    block['data'] = strings[block['data'][1]['i']]
+            else:
+                tokens = block.get('tokens', [])
+                for i in range(len(tokens)):
+                    token = tokens[i]
+                    if type(token) != str and token[0] == 'enc':
+                        tokens[i:i + 1] = [strings[token[1]['i']]]
 
 
 class CaseStructure(models.Model):
