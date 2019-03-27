@@ -297,7 +297,8 @@ def volume_to_json_inner(volume_barcode, unredacted_storage, redacted_storage=No
     fonts = {}
     paths = files_by_type(sorted(unredacted_storage.iter_files_recursive()))
 
-    # handle volmets
+    ### Extract data from volmets into volume dict ###
+
     print("Reading volmets")
     parsed = parse(unredacted_storage, paths['volume'][0])
     volume_el = parsed('volume')
@@ -305,7 +306,15 @@ def volume_to_json_inner(volume_barcode, unredacted_storage, redacted_storage=No
         'barcode': volume_el.attr.barcode,
         'page_labels': {int(item.attr.ORDER): item.attr.ORDERLABEL for item in parsed('structMap[TYPE="physical"] div[TYPE="volume"] div[TYPE="page"]').items()},
     }
-    metadata = volume['metadata'] = {}
+    metadata = volume['metadata'] = {
+        'start_date': volume_el('voldate start').text(),
+        'end_date': volume_el('voldate end').text(),
+        'spine_start_date': volume_el('spinedate start').text(),
+        'spine_end_date': volume_el('spinedate end').text(),
+        'publication_date': volume_el('publicationdate').text(),
+        'tar_path': str(unredacted_storage.path),
+        'tar_hash': unredacted_storage.get_hash(),
+    }
     reporter_el = volume_el('reporter')
     metadata['reporter'] = {
         'name': reporter_el.text(),
@@ -321,20 +330,14 @@ def volume_to_json_inner(volume_barcode, unredacted_storage, redacted_storage=No
     )]
     if nominative_reporters:
         metadata['nominative_reporters'] = nominative_reporters
-    metadata['start_date'] = volume_el('voldate start').text()
-    metadata['end_date'] = volume_el('voldate end').text()
-    metadata['spine_start_date'] = volume_el('spinedate start').text()
-    metadata['spine_end_date'] = volume_el('spinedate end').text()
-    metadata['publication_date'] = volume_el('publicationdate').text()
     publisher_el = volume_el('publisher')
     metadata['publisher'] = {
         'name': publisher_el.text(),
         'place': publisher_el.attr.place,
     }
-    metadata['tar_path'] = str(unredacted_storage.path)
-    metadata['tar_hash'] = unredacted_storage.get_hash()
 
-    # handle alto
+    ### Extract data for each page into the pages dict ###
+
     print("Reading ALTO files")
     fake_font_id = 1
     fonts_by_id = {}
@@ -344,13 +347,14 @@ def volume_to_json_inner(volume_barcode, unredacted_storage, redacted_storage=No
         parsed = parse(unredacted_storage, path)
         alto_id = 'alto_' + path.split('_ALTO_', 1)[1].split('.')[0]
 
-        # handle redaction
+        # load redacted file and determine which IDs appear in the redacted version
         if redacted_storage:
             redacted_parsed = parse(redacted_storage, path.replace('unredacted', 'redacted'))
             unredacted_block_ids = {block.attr.ID for block in redacted_parsed('TextBlock,Illustration').items()}
             unredacted_string_ids = {block.attr.ID for block in redacted_parsed('String').items()}
 
-        tags = {s.attrib['ID']: s.attrib['LABEL'] for s in parsed[0].iter('StructureTag')}  #
+        # build lookup of block labels (e.g. name, p, blockquote) by tagref ID
+        labels_by_tagref = {s.attrib['ID']: s.attrib['LABEL'] for s in parsed[0].iter('StructureTag')}  #
 
         page_el = parsed('Page')
         page = {
@@ -364,10 +368,12 @@ def volume_to_json_inner(volume_barcode, unredacted_storage, redacted_storage=No
             'spaces': [],
             'blocks': [],
         }
+
+        # look up page label from volume info
         page['label'] = volume['page_labels'][page['order']]
 
-        # look up PageStyle entries in DB
-        fonts_for_page = {}
+        # build a lookup of CaseFont objects by alto style ID
+        fonts_by_style_id = {}
         for s in parsed[0].iter('TextStyle'):
             font = (s.attrib['FONTFAMILY'], s.attrib['FONTSIZE'], s.attrib.get('FONTSTYLE', ''), s.attrib['FONTTYPE'], s.attrib['FONTWIDTH'])
             if font in fonts:
@@ -377,8 +383,8 @@ def volume_to_json_inner(volume_barcode, unredacted_storage, redacted_storage=No
                 fake_font_id += 1
                 font_id = fonts[font] = font_obj.pk
                 fonts_by_id[font_id] = font_obj
-            fonts_for_page[s.attrib['ID']] = font_id
-        page['font_names'] = {v:k for k, v in fonts_for_page.items()}  # used for confirming reversability
+            fonts_by_style_id[s.attrib['ID']] = font_id
+        page['font_names'] = {v:k for k, v in fonts_by_style_id.items()}  # used for confirming reversability
 
         for space_el in page_el('PrintSpace').items():
             space_rect = rect(space_el[0].attrib)
@@ -427,7 +433,7 @@ def volume_to_json_inner(volume_barcode, unredacted_storage, redacted_storage=No
                             if font != last_font:
                                 if last_font:
                                     tokens.append(['/font'])
-                                tokens.append(['font', {'id': fonts_for_page[font]}])
+                                tokens.append(['font', {'id': fonts_by_style_id[font]}])
                                 last_font = font
 
                             # handle redaction
