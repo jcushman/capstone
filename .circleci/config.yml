@@ -5,7 +5,7 @@ jobs:
     working_directory: ~/project/capstone
     steps:
       - checkout:
-        path: ~/project
+          path: ~/project
       - run:
           name: "Info"
           command: |
