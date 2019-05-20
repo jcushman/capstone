@@ -1,0 +1,19 @@
+version: 2
+jobs:
+  build:
+    machine: true
+    working_directory: ~/project/capstone
+    steps:
+      - checkout:
+        path: ~/project
+      - run:
+          name: "Info"
+          command: |
+            docker-compose --version
+            docker version
+      - run:
+          name: "Build development images"
+          command: docker-compose build
+      - run:
+          name: "Test"
+          command: docker-compose run --rm web fab test
