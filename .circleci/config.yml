@@ -11,9 +11,26 @@ jobs:
           command: |
             docker-compose --version
             docker version
+
+      - restore_cache:
+          key: docker-images-{{ checksum "docker-compose.yml" }}
       - run:
           name: "Build development images"
           command: docker-compose build
+          command: |
+            mkdir -p docker-cache
+            ls -la docker-cache
+            if test -f "docker-cache/built-image.tar"; then export DOCKER_IMAGE_EXISTS=true; else export DOCKER_IMAGE_EXISTS=false; fi
+            echo "DOCKER_IMAGE_EXISTS: " $DOCKER_IMAGE_EXISTS
+            if [ "$DOCKER_IMAGE_EXISTS" = true ] ; then docker load < docker-cache/built-image.tar; fi
+            docker-compose build
+            if ! [ "$DOCKER_IMAGE_EXISTS" = true ] ; then docker save -o docker-cache/built-image.tar $(docker-compose config | awk '/image: capstone:/ {print $2; exit}') ; fi
+            ls -la docker-cache
+      - save_cache:
+          key: docker-images-{{ checksum "docker-compose.yml" }}
+          paths:
+            - "docker-cache"
+
       - run:
           name: "Test"
           command: docker-compose run --rm web fab test
