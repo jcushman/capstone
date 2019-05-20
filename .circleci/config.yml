@@ -16,7 +16,6 @@ jobs:
           key: docker-images-{{ checksum "docker-compose.yml" }}
       - run:
           name: "Build development images"
-          command: docker-compose build
           command: |
             mkdir -p docker-cache
             ls -la docker-cache
