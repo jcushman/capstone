@@ -4,7 +4,7 @@ jobs:
     machine: true
     working_directory: ~/project/capstone
     steps:
-    
+
       # Initial setup
       - checkout:
           path: ~/project
@@ -13,6 +13,13 @@ jobs:
           command: |
             docker-compose --version
             docker version
+
+      # Quick tests to fail fast on common errors
+      - run:
+          name: "Flake8"
+          command: |
+            sudo pip install flake8
+            flake8
 
       # Docker build
       # This whole block shaves a minute or two off of the test runtime by using cached docker images.
@@ -34,11 +41,6 @@ jobs:
           key: docker-images-{{ checksum "docker-compose.yml" }}
           paths:
             - "~/docker-cache.tar"
-
-      # Quick tests to fail fast on common errors
-      - run:
-          name: "Flake8"
-          command: docker-compose run web flake8
 
       # Actual tests
       - run:
