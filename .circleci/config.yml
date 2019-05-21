@@ -1,6 +1,4 @@
 version: 2.1
-orbs:
-  codecov: codecov/codecov@1.0.4
 jobs:
   build:
     machine: true
@@ -42,12 +40,16 @@ jobs:
           command: |
             mkdir junit
             docker-compose run web pytest \
+              -k test_admin_user_authenticate \
               --junitxml=junit/test-results.xml `# write test results so they can be displayed by circleci` \
-               --cov --cov-config=setup.cfg     `# write coverage data to .coverage for upload by codecov` \
-               --fail-on-template-vars
+              --cov --cov-config=setup.cfg     `# write coverage data to .coverage for upload by codecov` \
+              --fail-on-template-vars
 
       - store_test_results:
           path: junit
 
-      - codecov/upload:
-          file: .coverage
+      - run:
+          name: "Upload coverage"
+          command: |
+            sudo pip install codecov
+            codecov
