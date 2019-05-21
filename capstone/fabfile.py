@@ -43,9 +43,9 @@ def run_django(port="127.0.0.1:8000"):
     management.call_command('runserver', port)
 
 @task
-def test():
+def test(extra_args=''):
     """ Run tests with coverage report. """
-    local("pytest --fail-on-template-vars --cov --cov-report=")
+    local("pytest --fail-on-template-vars --cov --cov-report= %s" % extra_args)
 
 @task(alias='pip-compile')
 def pip_compile(args=''):

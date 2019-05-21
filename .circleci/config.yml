@@ -1,4 +1,6 @@
 version: 2
+orbs:
+  codecov: codecov/codecov@1.0.4
 jobs:
   build:
     machine: true
@@ -37,5 +39,14 @@ jobs:
 
       - run:
           name: "Test"
-          command: docker-compose run web fab test
+          command: |
+            mkdir junit
+            docker-compose run web pytest --junitxml=junit/test-results.xml --cov=src --cov-report=xml --cov-report=html --fail-on-template-vars
 
+      - store_test_results:
+          path: junit
+
+      - store_artifacts:
+          path: junit
+
+      - codecov/upload:
