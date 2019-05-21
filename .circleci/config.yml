@@ -18,7 +18,8 @@ jobs:
       - run:
           name: "Flake8"
           command: |
-            sudo pip install flake8
+            pyenv shell 3.5.2
+            pip install `egrep -o 'flake8==\S+' requirements.txt`
             flake8
 
       # Docker build
