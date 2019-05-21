@@ -18,7 +18,7 @@ jobs:
       - run:
           name: "Flake8"
           command: |
-            pyenv shell 3.5.2
+            export PYENV_VERSION=3.5.2
             pip install `egrep -o 'flake8==\S+' requirements.txt`
             flake8
 
