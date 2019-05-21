@@ -49,8 +49,9 @@ jobs:
           command: |
             mkdir -p junit/pytest
             docker-compose run web pytest \
-              --junitxml=junit/pytest/test-results.xml `# write test results so they can be displayed by circleci` \
-              --cov --cov-config=setup.cfg     `# write coverage data to .coverage for upload by codecov` \
+              -k test_admin_user_authenticate
+              --junitxml=junit/pytest/test-results.xml       `# write test results so they can be displayed by circleci` \
+              --cov --cov-config=setup.cfg --cov-report xml  `# write coverage data to .coverage for upload by codecov` \
               --fail-on-template-vars
 
       # Upload test details to circleci
@@ -64,4 +65,5 @@ jobs:
           name: "Upload coverage"
           command: |
             sudo pip install codecov
-            codecov --file .coverage
+#            sed -i -e 's|/app/|'`pwd`'/|g' .coverage
+            codecov
