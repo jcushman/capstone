@@ -18,18 +18,18 @@ jobs:
       - run:
           name: "Build docker images"
           command: |
-            if test -f "~/docker-cache/project.tar"; then
+            if test -f "~/docker-cache.tar"; then
               echo "Loading cached docker images"
-              docker load -i ~/docker-cache/project.tar
+              docker load -i ~/docker-cache.tar
             else
               echo "Building new docker images"
               docker-compose build
-              docker save -o ~/docker-cache/project.tar capstone capstone-postgres
+              docker save -o ~/docker-cache.tar capstone capstone-postgres
             fi
       - save_cache:
           key: docker-images-{{ checksum "docker-compose.yml" }}
           paths:
-            - "~/docker-cache/project.tar"
+            - "~/docker-cache.tar"
 
       - run:
           name: "Test"
