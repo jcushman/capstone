@@ -6,6 +6,7 @@ jobs:
     steps:
       - checkout:
           path: ~/project
+
       - run:
           name: "Info"
           command: |
@@ -15,22 +16,20 @@ jobs:
       - restore_cache:
           key: docker-images-{{ checksum "docker-compose.yml" }}
       - run:
-          name: "Build development images"
+          name: "Build docker images"
           command: |
             mkdir -p docker-cache
-            ls -la docker-cache
-            if test -f "docker-cache/built-image.tar"; then export DOCKER_IMAGE_EXISTS=true; else export DOCKER_IMAGE_EXISTS=false; fi
-            echo "DOCKER_IMAGE_EXISTS: " $DOCKER_IMAGE_EXISTS
-            if [ "$DOCKER_IMAGE_EXISTS" = true ] ; then
+            if test -f "docker-cache/capstone.tar"; then
+              echo "Loading cached docker images"
+              for f in docker-cache/*.tar; do cat $f | docker load; done
               docker load -i docker-cache/built-image.tar
             else
+              echo "Building new docker images"
               docker build --cache-from=capstone -t app .
-              docker save -o docker-cache/built-image.tar $(docker-compose config | awk '/image: capstone:/ {print $2; exit}')
+              docker save -o docker-cache/capstone.tar $(docker-compose config | awk '/image: capstone:/ {print $2; exit}')
+              docker save -o docker-cache/capstone-postgres.tar $(docker-compose config | awk '/image: capstone-postgres:/ {print $2; exit}')
             fi
-            # docker-compose build
-            # if ! [ "$DOCKER_IMAGE_EXISTS" = true ] ; then docker save -o docker-cache/built-image.tar $(docker-compose config | awk '/image: capstone:/ {print $2; exit}') ; fi
             ls -la docker-cache
-
       - save_cache:
           key: docker-images-{{ checksum "docker-compose.yml" }}
           paths:
