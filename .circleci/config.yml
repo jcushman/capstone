@@ -65,5 +65,4 @@ jobs:
           name: "Upload coverage"
           command: |
             sudo pip install codecov
-#            sed -i -e 's|/app/|'`pwd`'/|g' .coverage
             codecov
