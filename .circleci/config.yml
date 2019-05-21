@@ -32,6 +32,10 @@ jobs:
             - "~/docker-cache.tar"
 
       - run:
+          name: "Flake8"
+          command: docker-compose run web flake8
+
+      - run:
           name: "Test"
-          command: docker-compose run --rm web fab test
+          command: docker-compose run web fab test
 
