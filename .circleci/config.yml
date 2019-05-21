@@ -41,13 +41,13 @@ jobs:
           name: "Test"
           command: |
             mkdir junit
-            docker-compose run web pytest --junitxml=junit/test-results.xml --cov=src --cov-report=xml --cov-report=html --fail-on-template-vars
+            docker-compose run web pytest \
+              --junitxml=junit/test-results.xml `# write test results so they can be displayed by circleci` \
+               --cov --cov-config=setup.cfg     `# write coverage data to .coverage for upload by codecov` \
+               --fail-on-template-vars
 
       - store_test_results:
           path: junit
 
-      - store_artifacts:
-          path: junit
-
-      - codecov/upload
-      
+      - codecov/upload:
+          file: .coverage
