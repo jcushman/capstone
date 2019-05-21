@@ -4,6 +4,7 @@ jobs:
     machine: true
     working_directory: ~/project/capstone
     steps:
+    
       # Initial setup
       - checkout:
           path: ~/project
@@ -50,12 +51,15 @@ jobs:
               --cov --cov-config=setup.cfg     `# write coverage data to .coverage for upload by codecov` \
               --fail-on-template-vars
 
-      # Upload
+      # Upload test details to circleci
       - store_test_results:
           path: junit
 
+      # Upload coverage to Codecov
+      # Recommended approach is to use an orb: https://circleci.com/blog/making-code-coverage-easy-to-see-with-the-codecov-orb/
+      # Currently using python package instead of orb, because of https://github.com/codecov/codecov-circleci-orb/issues/12
       - run:
           name: "Upload coverage"
           command: |
             sudo pip install codecov
-            codecov
+            codecov --file .coverage
