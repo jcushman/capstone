@@ -18,13 +18,13 @@ jobs:
       - run:
           name: "Flake8"
           command: |
-            export PYENV_VERSION=3.5.2
-            pip install `egrep -o 'flake8==\S+' requirements.txt`
+            export PYENV_VERSION=3.5.2  # use the version of python3 installed on circleci
+            pip install `egrep -o 'flake8==\S+' requirements.txt`  # install our version of flake8
             flake8
 
-      # Docker build
-      # This whole block shaves a minute or two off of the test runtime by using cached docker images.
-      # Otherwise we could omit it entirely and let `docker-compose run` build what it needs to.
+      # Docker image building and caching
+      # This block shaves a minute or two off of the test runtime by using cached docker images.
+      # Otherwise we could omit this step entirely and let `docker-compose run` build what it needs to.
       - restore_cache:
           key: docker-images-{{ checksum "docker-compose.yml" }}
       - run:
@@ -49,7 +49,6 @@ jobs:
           command: |
             mkdir -p junit/pytest
             docker-compose run web pytest \
-              -k test_admin_user_authenticate \
               --junitxml=junit/pytest/test-results.xml `# write test results so they can be displayed by circleci` \
               --cov --cov-config=setup.cfg     `# write coverage data to .coverage for upload by codecov` \
               --fail-on-template-vars

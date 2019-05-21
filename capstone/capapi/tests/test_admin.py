@@ -1,6 +1,5 @@
 import pytest
 from capapi.permissions import staff_level_permissions
-import requests
 
 from django.contrib.auth.models import Permission
 
