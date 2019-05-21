@@ -18,22 +18,19 @@ jobs:
       - run:
           name: "Build docker images"
           command: |
-            mkdir -p docker-cache
-            if test -f "docker-cache/capstone.tar"; then
+            mkdir -p /docker-cache
+            if test -f "/docker-cache/project.tar"; then
               echo "Loading cached docker images"
-              for f in docker-cache/*.tar; do cat $f | docker load; done
-              docker load -i docker-cache/built-image.tar
+              docker load -i /docker-cache/project.tar
             else
               echo "Building new docker images"
-              docker build --cache-from=capstone -t app .
-              docker save -o docker-cache/capstone.tar $(docker-compose config | awk '/image: capstone:/ {print $2; exit}')
-              docker save -o docker-cache/capstone-postgres.tar $(docker-compose config | awk '/image: capstone-postgres:/ {print $2; exit}')
+              docker-compose build
+              docker save -o /docker-cache/project.tar capstone capstone-postgres
             fi
-            ls -la docker-cache
       - save_cache:
           key: docker-images-{{ checksum "docker-compose.yml" }}
           paths:
-            - "docker-cache"
+            - "/docker-cache"
 
       - run:
           name: "Test"
