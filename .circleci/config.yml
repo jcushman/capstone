@@ -47,9 +47,9 @@ jobs:
       - run:
           name: "Test"
           command: |
-            mkdir -p junit/pytest
+            mkdir staticfiles                                # avoid whitenoise warning
+            mkdir -p junit/pytest                            # storage for circleci test info
             docker-compose run web pytest \
-              -k test_admin_user_authenticate \
               --junitxml=junit/pytest/test-results.xml       `# write test results so they can be displayed by circleci` \
               --cov --cov-config=setup.cfg --cov-report xml  `# write coverage data to .coverage for upload by codecov` \
               --fail-on-template-vars
