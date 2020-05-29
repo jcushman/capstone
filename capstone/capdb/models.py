@@ -1073,10 +1073,7 @@ class CaseMetadata(models.Model):
         except BulkIndexError as e:
             # this re-raises if there's a BulkIndexError for any reason other than a failure to delete because of a 404
             # which would happen if it was already deleted.
-            if not e[0].endswith('failed to index.') \
-                    or len([True for d in e.args[1] if d['delete']['status'] != 404
-                    or len(d.keys()) > 1
-                    or 'delete' not in d.keys()]) > 0:
+            if not e.args[0].endswith('failed to index.') or any(d['delete']['status'] != 404 for d in e.args[1]):
                 raise
 
     def reindex(self):
